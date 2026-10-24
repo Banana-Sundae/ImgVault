@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import hashlib
 from typing import Optional
 
 DB_PATH = os.environ.get("DB_PATH", "/data/db/snapvault.db")
@@ -231,6 +232,25 @@ def remove_photos_by_paths(paths: list[str]):
     return removed_info
 
 
+# Sort options exposed by /api/photos. Keys are what the frontend sends;
+# values are the SQL expressions used. Only these are ever put into a query,
+# so user input never reaches the SQL directly.
+SORT_COLUMNS = {
+    "date": "date_taken",              # EXIF date, falling back to filename date / file mtime (see indexer)
+    "modified": "file_modified_at",
+    "name": "filename COLLATE NOCASE",
+    "size": "file_size",
+    "duration": "duration",            # videos only; NULL for photos
+}
+DEFAULT_SORT = "date"
+
+
+def _seeded_rank(photo_id: str, seed: str) -> int:
+    """Deterministic pseudo-random rank so 'random' order is stable across pages."""
+    digest = hashlib.md5(f"{seed}:{photo_id}".encode()).hexdigest()
+    return int(digest[:12], 16)
+
+
 def search_photos(
     query: Optional[str] = None,
     folder: Optional[str] = None,
@@ -239,6 +259,9 @@ def search_photos(
     photo_type: Optional[str] = None,
     limit: int = 200,
     offset: int = 0,
+    sort: Optional[str] = None,
+    order: Optional[str] = None,
+    seed: Optional[str] = None,
 ) -> tuple[list[dict], int]:
     conn = get_db()
     conditions = []
@@ -273,10 +296,23 @@ def search_photos(
     count_row = conn.execute(f"SELECT COUNT(*) as cnt FROM photos WHERE {where}", params).fetchone()
     total = count_row["cnt"]
 
+    # Build ORDER BY from the whitelist only
+    direction = "ASC" if (order or "").lower() == "asc" else "DESC"
+    if sort == "random":
+        conn.create_function("seeded_rank", 2, _seeded_rank, deterministic=True)
+        order_by = "seeded_rank(id, ?), id"
+        order_params = [seed or "0"]
+    else:
+        col = SORT_COLUMNS.get(sort or DEFAULT_SORT, SORT_COLUMNS[DEFAULT_SORT])
+        # Missing values (e.g. photos with no duration) always go last; id breaks ties
+        # so pagination never repeats or skips items with equal values.
+        order_by = f"({col.split()[0]} IS NULL), {col} {direction}, id {direction}"
+        order_params = []
+
     # Get page
     rows = conn.execute(
-        f"SELECT * FROM photos WHERE {where} ORDER BY date_taken DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
+        f"SELECT * FROM photos WHERE {where} ORDER BY {order_by} LIMIT ? OFFSET ?",
+        params + order_params + [limit, offset],
     ).fetchall()
 
     conn.close()

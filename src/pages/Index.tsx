@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import AppHeader, { type ViewMode } from '@/components/AppHeader';
+import SortControl, { type SortField, type SortOrder } from '@/components/SortControl';
 import BottomNav from '@/components/BottomNav';
 import FolderSidebar from '@/components/FolderSidebar';
 import SearchBar from '@/components/SearchBar';
@@ -33,6 +34,26 @@ export default function Index() {
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
+
+  // Sorting — remembered per browser (wrapped in try/catch: storage can be unavailable)
+  const [sortField, setSortField] = useState<SortField>(() => {
+    try {
+      const v = localStorage.getItem('imgvault-sort');
+      return v && ['date', 'modified', 'name', 'size', 'duration', 'random'].includes(v) ? (v as SortField) : 'date';
+    } catch { return 'date'; }
+  });
+  const [sortOrder, setSortOrder] = useState<SortOrder>(() => {
+    try { return localStorage.getItem('imgvault-sort-order') === 'asc' ? 'asc' : 'desc'; } catch { return 'desc'; }
+  });
+  const [randomSeed, setRandomSeed] = useState(() => Math.random().toString(36).slice(2, 10));
+  useEffect(() => {
+    try {
+      localStorage.setItem('imgvault-sort', sortField);
+      localStorage.setItem('imgvault-sort-order', sortOrder);
+    } catch { /* ignore */ }
+  }, [sortField, sortOrder]);
+  // Video length only makes sense in the Videos view
+  const effectiveSort: SortField = sortField === 'duration' && typeFilter !== 'video' ? 'date' : sortField;
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
@@ -62,7 +83,10 @@ export default function Index() {
     folder: selectedFolder || undefined,
     query: debouncedQuery || undefined,
     type: typeFilter || undefined,
-  }), [selectedFolder, debouncedQuery, typeFilter]);
+    sort: effectiveSort,
+    order: sortOrder,
+    seed: effectiveSort === 'random' ? randomSeed : undefined,
+  }), [selectedFolder, debouncedQuery, typeFilter, effectiveSort, sortOrder, randomSeed]);
 
   // Load first page when filters change
   const loadPhotos = useCallback(async () => {
@@ -201,12 +225,27 @@ export default function Index() {
         />
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden lg:pb-0">
           {(viewMode === 'grid' || viewMode === 'map') && (
-            <div className="px-3 sm:px-5 pt-3 sm:pt-4 pb-2">
-              <SearchBar
-                value={searchQuery}
-                onChange={setSearchQuery}
-                resultCount={totalCount}
-              />
+            <div className="px-3 sm:px-5 pt-3 sm:pt-4 pb-2 flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <SearchBar
+                  value={searchQuery}
+                  onChange={setSearchQuery}
+                  resultCount={totalCount}
+                />
+              </div>
+              {viewMode === 'grid' && (
+                <SortControl
+                  sort={effectiveSort}
+                  order={sortOrder}
+                  videosOnly={typeFilter === 'video'}
+                  onSortChange={(s) => {
+                    if (s === 'random') setRandomSeed(Math.random().toString(36).slice(2, 10));
+                    setSortField(s);
+                  }}
+                  onOrderChange={setSortOrder}
+                  onReshuffle={() => setRandomSeed(Math.random().toString(36).slice(2, 10))}
+                />
+              )}
             </div>
           )}
           <div className={cn(
