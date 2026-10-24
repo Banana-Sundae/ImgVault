@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { fetchAuthStatus, isTabSignedIn, UNAUTHORIZED_EVENT } from '@/lib/api-client';
+import {
+  fetchAuthStatus, isTabSignedIn, sendClosing, sendHeartbeat, AUTH_CHANGED_EVENT, UNAUTHORIZED_EVENT,
+} from '@/lib/api-client';
 import LoginPage from '@/components/LoginPage';
+
+// How often an open tab tells the server it is still there. Must stay well under the
+// server's close grace period (30 s).
+const HEARTBEAT_MS = 10_000;
 
 type State = 'checking' | 'login' | 'ok';
 
@@ -12,9 +18,12 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<State>('checking');
   // Bumped after each login so the app remounts and reloads its data
   const [session, setSession] = useState(0);
+  // Whether a login is set up (the heartbeat is only needed then)
+  const [loginOn, setLoginOn] = useState(false);
 
   const check = useCallback(async () => {
     const status = await fetchAuthStatus();
+    setLoginOn(!!status?.enabled);
     // No backend reachable (frontend-only dev) or login switched off → let the app through.
     // Otherwise this tab itself must have signed in (the flag disappears when the tab closes).
     if (!status || !status.enabled) {
@@ -28,6 +37,32 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => { check(); }, [check]);
+
+  // Login turned on or off from Settings
+  useEffect(() => {
+    window.addEventListener(AUTH_CHANGED_EVENT, check);
+    return () => window.removeEventListener(AUTH_CHANGED_EVENT, check);
+  }, [check]);
+
+  // While signed in: tell the server this tab is open, and say so when it closes.
+  // The server ends the session shortly after the last tab closes, so a direct link
+  // to a photo or video stops working too, not just the app.
+  useEffect(() => {
+    if (!loginOn || state !== 'ok') return;
+    sendHeartbeat();
+    const timer = window.setInterval(sendHeartbeat, HEARTBEAT_MS);
+    const onVisible = () => { if (document.visibilityState === 'visible') sendHeartbeat(); };
+    const onShow = () => sendHeartbeat();          // page restored from the back/forward cache
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onShow);
+    window.addEventListener('pagehide', sendClosing);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onShow);
+      window.removeEventListener('pagehide', sendClosing);
+    };
+  }, [loginOn, state]);
 
   useEffect(() => {
     const onUnauthorized = () => setState('login');

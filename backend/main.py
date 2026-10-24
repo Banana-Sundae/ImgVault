@@ -28,6 +28,15 @@ from database import (
 from indexer import scan_directory, PHOTOS_DIR, THUMB_DIR, ALL_EXTENSIONS, generate_thumbnail, generate_video_thumbnail
 
 logger = logging.getLogger("snapvault")
+
+
+class _QuietHeartbeat(logging.Filter):
+    """Open tabs ping /api/auth/alive every few seconds; keep that out of the access log."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/api/auth/alive" not in record.getMessage()
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietHeartbeat())
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # Track indexing state
@@ -325,7 +334,7 @@ app = FastAPI(title="SnapVault API", version="1.0.0", lifespan=lifespan)
 async def require_login(request: Request, call_next):
     """Reject any /api/ request without a valid session cookie (when a login is set up)."""
     if auth.auth_enabled() and not auth.is_public_path(request.url.path):
-        if not auth.verify_session(request.cookies.get(auth.COOKIE_NAME)):
+        if not auth.session_is_live(request.cookies.get(auth.COOKIE_NAME)):
             return JSONResponse({"detail": "Not logged in"}, status_code=401)
     return await call_next(request)
 
@@ -379,7 +388,7 @@ class DisableLoginRequest(BaseModel):
 @app.get("/api/auth/status")
 def auth_status(request: Request):
     enabled = auth.auth_enabled()
-    authenticated = (not enabled) or auth.verify_session(request.cookies.get(auth.COOKIE_NAME))
+    authenticated = (not enabled) or auth.session_is_live(request.cookies.get(auth.COOKIE_NAME))
     return {
         "enabled": enabled,
         "authenticated": authenticated,
@@ -400,8 +409,24 @@ def auth_login(body: LoginRequest, request: Request):
     return _with_session({"ok": True}, request)
 
 
+@app.post("/api/auth/alive")
+def auth_alive(request: Request):
+    """Sent every few seconds by every open tab. Cancels a pending 'closing' report.
+    Only reached with a live session (the login check above rejects it otherwise)."""
+    auth.mark_alive(request.cookies.get(auth.COOKIE_NAME))
+    return {"ok": True}
+
+
+@app.post("/api/auth/closing")
+def auth_closing(request: Request):
+    """Sent by a tab as it closes. The session ends shortly after unless a tab sends /alive."""
+    auth.mark_closing(request.cookies.get(auth.COOKIE_NAME))
+    return {"ok": True}
+
+
 @app.post("/api/auth/logout")
-def auth_logout():
+def auth_logout(request: Request):
+    auth.revoke_session(request.cookies.get(auth.COOKIE_NAME))
     response = JSONResponse({"ok": True})
     response.delete_cookie(auth.COOKIE_NAME, path="/")
     return response

@@ -29,10 +29,14 @@ from typing import Optional
 
 COOKIE_NAME = "imgvault_session"
 # The cookie is a browser-session cookie (no lifetime), so it is dropped when the browser
-# closes. This is the server-side backstop: a session older than this is rejected even if
-# the browser kept the cookie.
-SESSION_HOURS = int(os.environ.get("IMGVAULT_SESSION_HOURS", "12"))
-SESSION_SECONDS = SESSION_HOURS * 60 * 60
+# closes. This is the hard limit on the server side: a session older than this is rejected
+# even if the browser kept the cookie and a tab is still open.
+SESSION_MINUTES = int(os.environ.get("IMGVAULT_SESSION_MINUTES", "60"))
+SESSION_SECONDS = SESSION_MINUTES * 60
+
+# When a tab says it is closing, the session is ended unless some open tab confirms it is
+# still alive within this many seconds (a reload or a second open tab does exactly that).
+CLOSE_GRACE_SECONDS = 30
 
 PBKDF2_ITERATIONS = 600_000   # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
 MIN_PASSWORD_LENGTH = 8
@@ -205,7 +209,8 @@ def _unb64(text: str) -> bytes:
 
 def create_session(now: Optional[float] = None) -> str:
     expires = int((now or time.time()) + SESSION_SECONDS)
-    payload = f"{current_username() or ''}|{expires}".encode()
+    # the random part makes every session token unique, so ending one never affects another
+    payload = f"{current_username() or ''}|{expires}|{secrets.token_hex(8)}".encode()
     sig = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
     return f"{_b64(payload)}.{_b64(sig)}"
 
@@ -224,13 +229,71 @@ def verify_session(token: Optional[str], now: Optional[float] = None) -> bool:
     if not hmac.compare_digest(sig, expected):
         return False
     try:
-        username, expires = payload.decode().rsplit("|", 1)
+        username, expires, _nonce = payload.decode().rsplit("|", 2)
         expires_at = int(expires)
     except Exception:
         return False
     if not hmac.compare_digest(username.encode(), username_now.encode()):
         return False
     return (now or time.time()) < expires_at
+
+
+# ---------- ending sessions early ----------
+#
+# Sessions are tracked in memory, which is fine because the server runs as a single
+# process. A restart forgets this state, which only means the hard time limit applies.
+
+_state_lock = threading.Lock()
+_closing: dict[str, float] = {}   # token -> when a tab reported it was closing
+_revoked: dict[str, float] = {}   # token -> when it was ended (kept until it would expire anyway)
+
+
+def _prune(now: float):
+    cutoff = now - SESSION_SECONDS - CLOSE_GRACE_SECONDS
+    for table in (_closing, _revoked):
+        for token in [t for t, at in table.items() if at < cutoff]:
+            del table[token]
+
+
+def session_is_live(token: Optional[str], now: Optional[float] = None) -> bool:
+    """A valid, unexpired session that has not been logged out or abandoned by a closed tab."""
+    now = now or time.time()
+    with _state_lock:
+        _prune(now)
+    if not verify_session(token, now):
+        return False
+    with _state_lock:
+        if token in _revoked:
+            return False
+        closing_since = _closing.get(token)
+        if closing_since is not None and now - closing_since > CLOSE_GRACE_SECONDS:
+            del _closing[token]
+            _revoked[token] = now
+            return False
+    return True
+
+
+def mark_closing(token: Optional[str], now: Optional[float] = None):
+    """A tab is closing. Ends the session after CLOSE_GRACE_SECONDS unless mark_alive() follows."""
+    now = now or time.time()
+    if session_is_live(token, now):
+        with _state_lock:
+            _closing.setdefault(token, now)   # repeated reports don't extend the deadline
+
+
+def mark_alive(token: Optional[str], now: Optional[float] = None):
+    """An open tab confirms it is still there (cancels a pending 'closing')."""
+    if session_is_live(token, now):
+        with _state_lock:
+            _closing.pop(token, None)
+
+
+def revoke_session(token: Optional[str], now: Optional[float] = None):
+    """End a session for good (log out), even if someone kept a copy of the cookie."""
+    if token:
+        with _state_lock:
+            _closing.pop(token, None)
+            _revoked[token] = now or time.time()
 
 
 # ---------- credential checks with rate limiting ----------
