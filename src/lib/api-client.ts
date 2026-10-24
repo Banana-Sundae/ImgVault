@@ -44,6 +44,9 @@ export async function fetchPhotos(params: {
   type?: string;
   limit?: number;
   offset?: number;
+  sort?: string;
+  order?: 'asc' | 'desc';
+  seed?: string;
 }): Promise<{ items: Photo[]; total: number }> {
   if (!(await isApiAvailable())) {
     // Fallback to mock data with client-side filtering
@@ -87,6 +90,9 @@ export async function fetchPhotos(params: {
   if (params.type) searchParams.set('type', params.type);
   if (params.limit) searchParams.set('limit', String(params.limit));
   if (params.offset) searchParams.set('offset', String(params.offset));
+  if (params.sort) searchParams.set('sort', params.sort);
+  if (params.order) searchParams.set('order', params.order);
+  if (params.seed) searchParams.set('seed', params.seed);
 
   return fetchJson(`${API_BASE}/photos?${searchParams}`);
 }

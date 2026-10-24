@@ -334,10 +334,15 @@ def list_photos(
     type: str = Query(None, description="Filter by type: image or video"),
     limit: int = Query(200, ge=1, le=50000),
     offset: int = Query(0, ge=0),
+    sort: str = Query("date", pattern="^(date|modified|name|size|duration|random)$",
+                      description="Sort field"),
+    order: str = Query("desc", pattern="^(asc|desc)$", description="Sort direction"),
+    seed: str = Query(None, max_length=64, description="Seed for random sort (keeps order stable across pages)"),
 ):
     photos, total = search_photos(
         query=q, folder=folder, date_from=date_from, date_to=date_to,
         photo_type=type, limit=limit, offset=offset,
+        sort=sort, order=order, seed=seed,
     )
 
     stale_paths = [
