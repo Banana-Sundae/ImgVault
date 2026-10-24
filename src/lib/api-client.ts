@@ -14,6 +14,9 @@ function isJsonResponse(res: Response) {
 /** Fired whenever the server says the session is missing or expired. AuthGate listens for it. */
 export const UNAUTHORIZED_EVENT = 'imgvault:unauthorized';
 
+/** Fired after the login is turned on or off from Settings, so AuthGate can re-check. */
+export const AUTH_CHANGED_EVENT = 'imgvault:auth-changed';
+
 async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(input, init);
   if (res.status === 401) {
@@ -380,12 +383,13 @@ export async function fetchAuthStatus(): Promise<AuthStatus | null> {
   }
 }
 
-export async function login(username: string, password: string): Promise<{ ok: boolean; error?: string }> {
+/** remember = "Keep me signed in" on this device. */
+export async function login(username: string, password: string, remember = false): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await fetch(`${API_BASE}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, remember }),
     });
     if (res.ok) return { ok: true };
     const body = isJsonResponse(res) ? await res.json().catch(() => null) : null;
@@ -428,13 +432,36 @@ async function postAuth(path: string, method: string, body: unknown): Promise<{ 
 }
 
 /** Turn the login on (only works while no login exists). Signs this device in. */
-export const setupLogin = (username: string, password: string) =>
-  postAuth('setup', 'POST', { username, password });
+export const setupLogin = async (username: string, password: string) => {
+  const result = await postAuth('setup', 'POST', { username, password });
+  if (result.ok) window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
+  return result;
+};
 
 /** Change username and/or password. Leave newPassword empty to keep the current one. */
 export const changeLogin = (currentPassword: string, username: string, newPassword?: string) =>
   postAuth('credentials', 'PUT', { current_password: currentPassword, username, new_password: newPassword || null });
 
 /** Turn the login off. */
-export const disableLogin = (currentPassword: string) =>
-  postAuth('disable', 'POST', { current_password: currentPassword });
+export const disableLogin = async (currentPassword: string) => {
+  const result = await postAuth('disable', 'POST', { current_password: currentPassword });
+  if (result.ok) window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
+  return result;
+};
+
+/**
+ * Tells the server you're still using the app, which pushes the 30-minute idle deadline back.
+ * Returns false (and shows the login page) if the session has already ended.
+ */
+export async function sendActivity(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/activity`, { method: 'POST', cache: 'no-store' });
+    if (res.status === 401) {
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+      return false;
+    }
+    return true;
+  } catch {
+    return true;   // server unreachable: not a reason to lock
+  }
+}

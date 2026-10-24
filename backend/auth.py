@@ -28,8 +28,16 @@ import time
 from typing import Optional
 
 COOKIE_NAME = "imgvault_session"
-SESSION_DAYS = int(os.environ.get("IMGVAULT_SESSION_DAYS", "30"))
-SESSION_SECONDS = SESSION_DAYS * 24 * 60 * 60
+
+# Idle timeout: a session ends after this long with no activity in the app. Activity
+# (clicking, scrolling, typing, a playing video) pushes the deadline back.
+IDLE_SECONDS = int(os.environ.get("IMGVAULT_IDLE_MINUTES", "30")) * 60
+# "Keep me signed in": the same idea, with a much longer idle limit.
+REMEMBER_IDLE_SECONDS = int(os.environ.get("IMGVAULT_REMEMBER_DAYS", "30")) * 24 * 60 * 60
+
+# Hard caps from first sign-in, so activity can't keep a session going for ever.
+MAX_SESSION_SECONDS = 24 * 60 * 60            # normal sign-in: 1 day
+MAX_REMEMBER_SECONDS = 90 * 24 * 60 * 60      # "keep me signed in": 90 days
 
 PBKDF2_ITERATIONS = 600_000   # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
 MIN_PASSWORD_LENGTH = 8
@@ -200,34 +208,101 @@ def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def create_session(now: Optional[float] = None) -> str:
-    expires = int((now or time.time()) + SESSION_SECONDS)
-    payload = f"{current_username() or ''}|{expires}".encode()
+class Session:
+    """What a valid session cookie says."""
+    __slots__ = ("sid", "issued", "expires", "remember")
+
+    def __init__(self, sid: str, issued: int, expires: int, remember: bool):
+        self.sid, self.issued, self.expires, self.remember = sid, issued, expires, remember
+
+
+def _idle_limit(remember: bool) -> int:
+    return REMEMBER_IDLE_SECONDS if remember else IDLE_SECONDS
+
+
+def _hard_limit(remember: bool) -> int:
+    return MAX_REMEMBER_SECONDS if remember else MAX_SESSION_SECONDS
+
+
+def create_session(remember: bool = False, now: Optional[float] = None,
+                   sid: Optional[str] = None, issued: Optional[int] = None) -> str:
+    """Sign a session cookie. Pass sid/issued to extend an existing session (see refresh_session)."""
+    now = int(now or time.time())
+    sid = sid or secrets.token_hex(8)          # unique per sign-in, kept across refreshes
+    issued = issued or now
+    expires = min(now + _idle_limit(remember), issued + _hard_limit(remember))
+    payload = f"{current_username() or ''}|{sid}|{issued}|{expires}|{int(remember)}".encode()
     sig = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
     return f"{_b64(payload)}.{_b64(sig)}"
 
 
-def verify_session(token: Optional[str], now: Optional[float] = None) -> bool:
+def read_session(token: Optional[str], now: Optional[float] = None) -> Optional[Session]:
+    """The session in a cookie, or None if it's forged, for another user, expired or logged out."""
+    _prune_revoked(now or time.time())
     username_now = current_username()
     if not username_now or not token or "." not in token:
-        return False
+        return None
     try:
         payload_b64, sig_b64 = token.split(".", 1)
         payload = _unb64(payload_b64)
         sig = _unb64(sig_b64)
     except Exception:
-        return False
+        return None
     expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
     if not hmac.compare_digest(sig, expected):
-        return False
+        return None
     try:
-        username, expires = payload.decode().rsplit("|", 1)
-        expires_at = int(expires)
+        username, sid, issued, expires, remember = payload.decode().rsplit("|", 4)
+        session = Session(sid, int(issued), int(expires), remember == "1")
     except Exception:
-        return False
+        return None
     if not hmac.compare_digest(username.encode(), username_now.encode()):
-        return False
-    return (now or time.time()) < expires_at
+        return None
+    now = now or time.time()
+    if now >= session.expires or now >= session.issued + _hard_limit(session.remember):
+        return None
+    if _is_revoked(session.sid, now):
+        return None
+    return session
+
+
+def verify_session(token: Optional[str], now: Optional[float] = None) -> bool:
+    return read_session(token, now) is not None
+
+
+def refresh_session(token: Optional[str], now: Optional[float] = None) -> Optional[str]:
+    """Activity: the same session with its idle deadline pushed back (never past the hard cap)."""
+    session = read_session(token, now)
+    if not session:
+        return None
+    return create_session(session.remember, now, sid=session.sid, issued=session.issued)
+
+
+# ---------- logging out ----------
+#
+# Logged-out sessions are remembered in memory (the server runs as one process) so a copied
+# cookie stops working. A restart forgets them, but each one would expire on its own anyway.
+
+_revoked: dict[str, float] = {}   # session id -> when its cookie would have expired at the latest
+_revoked_lock = threading.Lock()
+
+
+def _prune_revoked(now: float):
+    with _revoked_lock:
+        for old in [k for k, until in _revoked.items() if until < now]:
+            del _revoked[old]
+
+
+def _is_revoked(sid: str, now: float) -> bool:
+    with _revoked_lock:
+        return sid in _revoked
+
+
+def revoke_session(token: Optional[str], now: Optional[float] = None):
+    session = read_session(token, now)
+    if session:
+        with _revoked_lock:
+            _revoked[session.sid] = session.issued + _hard_limit(session.remember)
 
 
 # ---------- credential checks with rate limiting ----------
