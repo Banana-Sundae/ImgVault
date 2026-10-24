@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Settings, Globe, RefreshCw, Loader2, Sparkles, BarChart3, Trash2, Sun, Moon, Zap } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { fetchSettings, updateSetting, fetchIndexStatus, triggerReindex, triggerQuickReindex, fetchStats } from '@/lib/api-client';
+import LoginSettings from '@/components/LoginSettings';
 import { toast } from 'sonner';
 import CleanupView from './CleanupView';
 import StatsDashboard from './StatsDashboard';
@@ -165,6 +166,9 @@ export default function SettingsView({ onSelectPhoto }: SettingsViewProps) {
       <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin pt-4">
         {tab === 'general' && (
           <div className="max-w-lg space-y-6">
+            {/* Account */}
+            <LoginSettings />
+
             {/* Appearance */}
             <section className="space-y-3">
               <h2 className="text-sm font-semibold text-foreground">Appearance</h2>

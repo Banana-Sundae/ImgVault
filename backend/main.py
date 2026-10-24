@@ -11,7 +11,8 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
+
+import auth
 
 from database import (
     init_db, upsert_photo, upsert_photos_batch, search_photos, get_folder_tree, get_photo_by_id,
@@ -317,12 +318,144 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SnapVault API", version="1.0.0", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS middleware: the frontend is served from the same address as the API,
+# so cross-site access is not needed (and with a login it should not be allowed).
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    """Reject any /api/ request without a valid session cookie (when a login is set up)."""
+    if auth.auth_enabled() and not auth.is_public_path(request.url.path):
+        if not auth.verify_session(request.cookies.get(auth.COOKIE_NAME)):
+            return JSONResponse({"detail": "Not logged in"}, status_code=401)
+    return await call_next(request)
+
+
+def _client_address(request: Request) -> str:
+    # nginx passes the real address in X-Real-IP; fall back to the direct peer
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+
+
+def _with_session(body: dict, request: Request) -> JSONResponse:
+    response = JSONResponse(body)
+    response.set_cookie(
+        auth.COOKIE_NAME,
+        auth.create_session(),
+        max_age=auth.SESSION_SECONDS,
+        httponly=True,       # not readable by page scripts
+        samesite="lax",      # not sent on cross-site requests
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+    return response
+
+
+def _locked_response(address: str):
+    wait = auth.seconds_locked(address)
+    if wait:
+        return JSONResponse({"detail": f"Too many attempts. Try again in {wait} seconds."}, status_code=429)
+    return None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class SetupLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class ChangeLoginRequest(BaseModel):
+    current_password: str
+    username: str
+    new_password: Optional[str] = None   # omit to keep the current password
+
+
+class DisableLoginRequest(BaseModel):
+    current_password: str
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request):
+    enabled = auth.auth_enabled()
+    authenticated = (not enabled) or auth.verify_session(request.cookies.get(auth.COOKIE_NAME))
+    return {
+        "enabled": enabled,
+        "authenticated": authenticated,
+        "username": auth.current_username() if (enabled and authenticated) else None,
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(body: LoginRequest, request: Request):
+    if not auth.auth_enabled():
+        return {"ok": True}
+    address = _client_address(request)
+    if (locked := _locked_response(address)):
+        return locked
+    if not auth.check_credentials(address, body.username, body.password):
+        time.sleep(1)  # slow down guessing
+        return JSONResponse({"detail": "Incorrect username or password"}, status_code=401)
+    return _with_session({"ok": True}, request)
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return response
+
+
+@app.post("/api/auth/setup")
+def auth_setup(body: SetupLoginRequest, request: Request):
+    """Turn the login on. Only allowed while no login exists."""
+    if auth.auth_enabled():
+        raise HTTPException(409, "A login is already set up")
+    try:
+        auth.set_login(body.username, body.password)
+    except auth.LoginError as e:
+        raise HTTPException(400, str(e))
+    logger.info("Login set up for user '%s'", auth.current_username())
+    return _with_session({"ok": True}, request)
+
+
+@app.put("/api/auth/credentials")
+def auth_change(body: ChangeLoginRequest, request: Request):
+    """Change username and/or password. Needs the current password. Signs out other devices
+    when the password changes; this device gets a fresh session."""
+    if not auth.auth_enabled():
+        raise HTTPException(409, "No login is set up")
+    address = _client_address(request)
+    if (locked := _locked_response(address)):
+        return locked
+    if not auth.check_current_password(address, body.current_password):
+        time.sleep(1)
+        return JSONResponse({"detail": "Current password is incorrect"}, status_code=403)
+    try:
+        auth.set_login(body.username, body.new_password or None)
+    except auth.LoginError as e:
+        raise HTTPException(400, str(e))
+    logger.info("Login updated for user '%s'", auth.current_username())
+    return _with_session({"ok": True}, request)
+
+
+@app.post("/api/auth/disable")
+def auth_disable(body: DisableLoginRequest, request: Request):
+    """Turn the login off. Needs the current password."""
+    if not auth.auth_enabled():
+        return {"ok": True}
+    address = _client_address(request)
+    if (locked := _locked_response(address)):
+        return locked
+    if not auth.check_current_password(address, body.current_password):
+        time.sleep(1)
+        return JSONResponse({"detail": "Current password is incorrect"}, status_code=403)
+    auth.remove_login()
+    logger.warning("Login turned off")
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return response
 
 
 @app.get("/api/photos")
