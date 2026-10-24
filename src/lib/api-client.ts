@@ -11,21 +11,11 @@ function isJsonResponse(res: Response) {
   return contentType.includes('application/json');
 }
 
-/**
- * Per-tab marker that this tab signed in. sessionStorage is cleared when the tab is closed,
- * so a new tab (or a reopened one) always has to sign in again, even if the browser still
- * holds the session cookie.
- */
-const TAB_SIGNED_IN_KEY = 'imgvault-tab-signed-in';
-export const markTabSignedIn = () => { try { sessionStorage.setItem(TAB_SIGNED_IN_KEY, '1'); } catch { /* ignore */ } };
-export const clearTabSignedIn = () => { try { sessionStorage.removeItem(TAB_SIGNED_IN_KEY); } catch { /* ignore */ } };
-export const isTabSignedIn = () => { try { return sessionStorage.getItem(TAB_SIGNED_IN_KEY) === '1'; } catch { return false; } };
+/** Fired whenever the server says the session is missing or expired. AuthGate listens for it. */
+export const UNAUTHORIZED_EVENT = 'imgvault:unauthorized';
 
 /** Fired after the login is turned on or off from Settings, so AuthGate can re-check. */
 export const AUTH_CHANGED_EVENT = 'imgvault:auth-changed';
-
-/** Fired whenever the server says the session is missing or expired. AuthGate listens for it. */
-export const UNAUTHORIZED_EVENT = 'imgvault:unauthorized';
 
 async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(input, init);
@@ -393,14 +383,15 @@ export async function fetchAuthStatus(): Promise<AuthStatus | null> {
   }
 }
 
-export async function login(username: string, password: string): Promise<{ ok: boolean; error?: string }> {
+/** remember = "Keep me signed in" on this device. */
+export async function login(username: string, password: string, remember = false): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await fetch(`${API_BASE}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, remember }),
     });
-    if (res.ok) { markTabSignedIn(); return { ok: true }; }
+    if (res.ok) return { ok: true };
     const body = isJsonResponse(res) ? await res.json().catch(() => null) : null;
     return { ok: false, error: body?.detail || 'Login failed' };
   } catch {
@@ -410,7 +401,6 @@ export async function login(username: string, password: string): Promise<{ ok: b
 
 /** Ends the session and wipes this browser's offline caches (thumbnails etc.). */
 export async function logout(): Promise<void> {
-  clearTabSignedIn();
   try {
     await fetch(`${API_BASE}/auth/logout`, { method: 'POST' });
   } catch { /* still clear local data below */ }
@@ -444,10 +434,7 @@ async function postAuth(path: string, method: string, body: unknown): Promise<{ 
 /** Turn the login on (only works while no login exists). Signs this device in. */
 export const setupLogin = async (username: string, password: string) => {
   const result = await postAuth('setup', 'POST', { username, password });
-  if (result.ok) {
-    markTabSignedIn();   // the server signed this device in
-    window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
-  }
+  if (result.ok) window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
   return result;
 };
 
@@ -458,27 +445,23 @@ export const changeLogin = (currentPassword: string, username: string, newPasswo
 /** Turn the login off. */
 export const disableLogin = async (currentPassword: string) => {
   const result = await postAuth('disable', 'POST', { current_password: currentPassword });
-  if (result.ok) {
-    clearTabSignedIn();
-    window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
-  }
+  if (result.ok) window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
   return result;
 };
 
 /**
- * Tells the server this tab is still open. Sent every few seconds by every open tab.
- * If the session has ended (expired, or every tab was closed), drops back to the login page.
+ * Tells the server you're still using the app, which pushes the 30-minute idle deadline back.
+ * Returns false (and shows the login page) if the session has already ended.
  */
-export async function sendHeartbeat(): Promise<void> {
+export async function sendActivity(): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/auth/alive`, { method: 'POST', cache: 'no-store' });
-    if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-  } catch { /* server unreachable; try again next time */ }
-}
-
-/** Tells the server this tab is closing. Uses sendBeacon, which still goes out while a page unloads. */
-export function sendClosing(): void {
-  try {
-    navigator.sendBeacon?.(`${API_BASE}/auth/closing`);
-  } catch { /* ignore */ }
+    const res = await fetch(`${API_BASE}/auth/activity`, { method: 'POST', cache: 'no-store' });
+    if (res.status === 401) {
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+      return false;
+    }
+    return true;
+  } catch {
+    return true;   // server unreachable: not a reason to lock
+  }
 }

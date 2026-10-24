@@ -166,14 +166,18 @@ All configuration is done via environment variables:
 | `TRANSCODE_DIR` | `/data/transcoded` | Transcoded video cache directory |
 | `CONVERT_DIR` | `/data/converted` | Converted image cache directory |
 | `TRASH_DIR` | `/data/trash` | Trash/recycle bin directory |
-| `IMGVAULT_SESSION_MINUTES` | `60` | Longest a login can last, even if the tab stays open |
+| `IMGVAULT_IDLE_MINUTES` | `30` | Sign-in ends after this long without using the app |
+| `IMGVAULT_REMEMBER_DAYS` | `30` | The same, when "Keep me signed in" is ticked |
 
 ### Login
 
 Login is off by default. Turn it on from **Settings → General → Account** by choosing a username and password.
 
 - Only a salted PBKDF2-SHA256 hash of the password is stored, in `auth.json` in the database folder (e.g. `/mnt/user/appdata/imgvault/db/auth.json` on Unraid). The password itself is never saved.
-- Closing a tab signs you out of it: opening ImgVault in a new tab asks for the password again. About 30 seconds after the last tab closes, the server ends the session too, so direct links to photos stop working. Every login also ends after `IMGVAULT_SESSION_MINUTES` (default 60), even if you keep the tab open.
+- You stay signed in while you're using the app (clicking, scrolling, typing, or a video playing). After 30 minutes without that, ImgVault asks for the password again; an open tab switches to the login page by itself, and a tab you come back to checks straight away.
+- Tick **Keep me signed in** on a personal device to stretch that to 30 days. Leave it unticked on shared devices; the sign-in then also ends when the browser closes.
+- Every sign-in ends after 1 day (90 days with Keep me signed in), however much it's used.
+- Logging out ends the session on the server too, so a copied cookie stops working.
 - Changing the password signs out every other device.
 - Five wrong attempts from one device lock it out for 60 seconds.
 - **Forgot the password?** Delete `auth.json` from the database folder and restart the container. Login will be off again and you can set a new one.

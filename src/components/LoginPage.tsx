@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 export default function LoginPage({ onSuccess }: { onSuccess: () => void }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [remember, setRemember] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -14,7 +15,7 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }) {
     if (busy || !username || !password) return;
     setBusy(true);
     setError(null);
-    const result = await login(username, password);
+    const result = await login(username, password, remember);
     setBusy(false);
     if (result.ok) {
       onSuccess();
@@ -66,6 +67,21 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }) {
             />
           </div>
         </div>
+
+        <label className="flex items-start gap-2.5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-border accent-[hsl(var(--primary))]"
+          />
+          <span className="text-sm text-foreground">
+            Keep me signed in
+            <span className="block text-xs text-muted-foreground">
+              For 30 days on this device. Leave unticked on shared devices.
+            </span>
+          </span>
+        </label>
 
         {error && (
           <p role="alert" className="text-sm text-destructive text-center">{error}</p>

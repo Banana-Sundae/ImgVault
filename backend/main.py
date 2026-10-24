@@ -30,13 +30,14 @@ from indexer import scan_directory, PHOTOS_DIR, THUMB_DIR, ALL_EXTENSIONS, gener
 logger = logging.getLogger("snapvault")
 
 
-class _QuietHeartbeat(logging.Filter):
-    """Open tabs ping /api/auth/alive every few seconds; keep that out of the access log."""
+class _QuietAuthPings(logging.Filter):
+    """Open tabs check in about once a minute; keep that out of the access log."""
     def filter(self, record: logging.LogRecord) -> bool:
-        return "/api/auth/alive" not in record.getMessage()
+        msg = record.getMessage()
+        return "/api/auth/activity" not in msg and "/api/auth/status" not in msg
 
 
-logging.getLogger("uvicorn.access").addFilter(_QuietHeartbeat())
+logging.getLogger("uvicorn.access").addFilter(_QuietAuthPings())
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # Track indexing state
@@ -334,7 +335,7 @@ app = FastAPI(title="SnapVault API", version="1.0.0", lifespan=lifespan)
 async def require_login(request: Request, call_next):
     """Reject any /api/ request without a valid session cookie (when a login is set up)."""
     if auth.auth_enabled() and not auth.is_public_path(request.url.path):
-        if not auth.session_is_live(request.cookies.get(auth.COOKIE_NAME)):
+        if not auth.verify_session(request.cookies.get(auth.COOKIE_NAME)):
             return JSONResponse({"detail": "Not logged in"}, status_code=401)
     return await call_next(request)
 
@@ -344,12 +345,15 @@ def _client_address(request: Request) -> str:
     return request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
 
 
-def _with_session(body: dict, request: Request) -> JSONResponse:
+def _with_session(body: dict, request: Request, token: str) -> JSONResponse:
     response = JSONResponse(body)
+    session = auth.read_session(token)
+    # "Keep me signed in" → the cookie outlives the browser; otherwise it goes when the browser closes
+    max_age = int(session.expires - time.time()) if (session and session.remember) else None
     response.set_cookie(
         auth.COOKIE_NAME,
-        auth.create_session(),
-        # no max_age: a session cookie, removed when the browser closes
+        token,
+        max_age=max_age,
         httponly=True,       # not readable by page scripts
         samesite="lax",      # not sent on cross-site requests
         secure=request.url.scheme == "https",
@@ -368,6 +372,7 @@ def _locked_response(address: str):
 class LoginRequest(BaseModel):
     username: str
     password: str
+    remember: bool = False   # "Keep me signed in"
 
 
 class SetupLoginRequest(BaseModel):
@@ -388,7 +393,7 @@ class DisableLoginRequest(BaseModel):
 @app.get("/api/auth/status")
 def auth_status(request: Request):
     enabled = auth.auth_enabled()
-    authenticated = (not enabled) or auth.session_is_live(request.cookies.get(auth.COOKIE_NAME))
+    authenticated = (not enabled) or auth.verify_session(request.cookies.get(auth.COOKIE_NAME))
     return {
         "enabled": enabled,
         "authenticated": authenticated,
@@ -406,27 +411,22 @@ def auth_login(body: LoginRequest, request: Request):
     if not auth.check_credentials(address, body.username, body.password):
         time.sleep(1)  # slow down guessing
         return JSONResponse({"detail": "Incorrect username or password"}, status_code=401)
-    return _with_session({"ok": True}, request)
+    return _with_session({"ok": True}, request, auth.create_session(remember=body.remember))
 
 
-@app.post("/api/auth/alive")
-def auth_alive(request: Request):
-    """Sent every few seconds by every open tab. Cancels a pending 'closing' report.
-    Only reached with a live session (the login check above rejects it otherwise)."""
-    auth.mark_alive(request.cookies.get(auth.COOKIE_NAME))
-    return {"ok": True}
-
-
-@app.post("/api/auth/closing")
-def auth_closing(request: Request):
-    """Sent by a tab as it closes. The session ends shortly after unless a tab sends /alive."""
-    auth.mark_closing(request.cookies.get(auth.COOKIE_NAME))
-    return {"ok": True}
+@app.post("/api/auth/activity")
+def auth_activity(request: Request):
+    """Sent by an open tab about once a minute while you're using it. Pushes the idle
+    deadline back. Only reached with a valid session (the login check above)."""
+    token = auth.refresh_session(request.cookies.get(auth.COOKIE_NAME))
+    if not token:
+        return JSONResponse({"detail": "Not logged in"}, status_code=401)
+    return _with_session({"ok": True}, request, token)
 
 
 @app.post("/api/auth/logout")
 def auth_logout(request: Request):
-    auth.revoke_session(request.cookies.get(auth.COOKIE_NAME))
+    auth.revoke_session(request.cookies.get(auth.COOKIE_NAME))   # a copied cookie stops working too
     response = JSONResponse({"ok": True})
     response.delete_cookie(auth.COOKIE_NAME, path="/")
     return response
@@ -442,7 +442,7 @@ def auth_setup(body: SetupLoginRequest, request: Request):
     except auth.LoginError as e:
         raise HTTPException(400, str(e))
     logger.info("Login set up for user '%s'", auth.current_username())
-    return _with_session({"ok": True}, request)
+    return _with_session({"ok": True}, request, auth.create_session())
 
 
 @app.put("/api/auth/credentials")
@@ -454,6 +454,8 @@ def auth_change(body: ChangeLoginRequest, request: Request):
     address = _client_address(request)
     if (locked := _locked_response(address)):
         return locked
+    current = auth.read_session(request.cookies.get(auth.COOKIE_NAME))
+    remember = bool(current and current.remember)
     if not auth.check_current_password(address, body.current_password):
         time.sleep(1)
         return JSONResponse({"detail": "Current password is incorrect"}, status_code=403)
@@ -462,7 +464,7 @@ def auth_change(body: ChangeLoginRequest, request: Request):
     except auth.LoginError as e:
         raise HTTPException(400, str(e))
     logger.info("Login updated for user '%s'", auth.current_username())
-    return _with_session({"ok": True}, request)
+    return _with_session({"ok": True}, request, auth.create_session(remember=remember))
 
 
 @app.post("/api/auth/disable")

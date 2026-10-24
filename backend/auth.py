@@ -28,15 +28,16 @@ import time
 from typing import Optional
 
 COOKIE_NAME = "imgvault_session"
-# The cookie is a browser-session cookie (no lifetime), so it is dropped when the browser
-# closes. This is the hard limit on the server side: a session older than this is rejected
-# even if the browser kept the cookie and a tab is still open.
-SESSION_MINUTES = int(os.environ.get("IMGVAULT_SESSION_MINUTES", "60"))
-SESSION_SECONDS = SESSION_MINUTES * 60
 
-# When a tab says it is closing, the session is ended unless some open tab confirms it is
-# still alive within this many seconds (a reload or a second open tab does exactly that).
-CLOSE_GRACE_SECONDS = 30
+# Idle timeout: a session ends after this long with no activity in the app. Activity
+# (clicking, scrolling, typing, a playing video) pushes the deadline back.
+IDLE_SECONDS = int(os.environ.get("IMGVAULT_IDLE_MINUTES", "30")) * 60
+# "Keep me signed in": the same idea, with a much longer idle limit.
+REMEMBER_IDLE_SECONDS = int(os.environ.get("IMGVAULT_REMEMBER_DAYS", "30")) * 24 * 60 * 60
+
+# Hard caps from first sign-in, so activity can't keep a session going for ever.
+MAX_SESSION_SECONDS = 24 * 60 * 60            # normal sign-in: 1 day
+MAX_REMEMBER_SECONDS = 90 * 24 * 60 * 60      # "keep me signed in": 90 days
 
 PBKDF2_ITERATIONS = 600_000   # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
 MIN_PASSWORD_LENGTH = 8
@@ -207,93 +208,101 @@ def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def create_session(now: Optional[float] = None) -> str:
-    expires = int((now or time.time()) + SESSION_SECONDS)
-    # the random part makes every session token unique, so ending one never affects another
-    payload = f"{current_username() or ''}|{expires}|{secrets.token_hex(8)}".encode()
+class Session:
+    """What a valid session cookie says."""
+    __slots__ = ("sid", "issued", "expires", "remember")
+
+    def __init__(self, sid: str, issued: int, expires: int, remember: bool):
+        self.sid, self.issued, self.expires, self.remember = sid, issued, expires, remember
+
+
+def _idle_limit(remember: bool) -> int:
+    return REMEMBER_IDLE_SECONDS if remember else IDLE_SECONDS
+
+
+def _hard_limit(remember: bool) -> int:
+    return MAX_REMEMBER_SECONDS if remember else MAX_SESSION_SECONDS
+
+
+def create_session(remember: bool = False, now: Optional[float] = None,
+                   sid: Optional[str] = None, issued: Optional[int] = None) -> str:
+    """Sign a session cookie. Pass sid/issued to extend an existing session (see refresh_session)."""
+    now = int(now or time.time())
+    sid = sid or secrets.token_hex(8)          # unique per sign-in, kept across refreshes
+    issued = issued or now
+    expires = min(now + _idle_limit(remember), issued + _hard_limit(remember))
+    payload = f"{current_username() or ''}|{sid}|{issued}|{expires}|{int(remember)}".encode()
     sig = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
     return f"{_b64(payload)}.{_b64(sig)}"
 
 
-def verify_session(token: Optional[str], now: Optional[float] = None) -> bool:
+def read_session(token: Optional[str], now: Optional[float] = None) -> Optional[Session]:
+    """The session in a cookie, or None if it's forged, for another user, expired or logged out."""
+    _prune_revoked(now or time.time())
     username_now = current_username()
     if not username_now or not token or "." not in token:
-        return False
+        return None
     try:
         payload_b64, sig_b64 = token.split(".", 1)
         payload = _unb64(payload_b64)
         sig = _unb64(sig_b64)
     except Exception:
-        return False
+        return None
     expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
     if not hmac.compare_digest(sig, expected):
-        return False
+        return None
     try:
-        username, expires, _nonce = payload.decode().rsplit("|", 2)
-        expires_at = int(expires)
+        username, sid, issued, expires, remember = payload.decode().rsplit("|", 4)
+        session = Session(sid, int(issued), int(expires), remember == "1")
     except Exception:
-        return False
+        return None
     if not hmac.compare_digest(username.encode(), username_now.encode()):
-        return False
-    return (now or time.time()) < expires_at
+        return None
+    now = now or time.time()
+    if now >= session.expires or now >= session.issued + _hard_limit(session.remember):
+        return None
+    if _is_revoked(session.sid, now):
+        return None
+    return session
 
 
-# ---------- ending sessions early ----------
+def verify_session(token: Optional[str], now: Optional[float] = None) -> bool:
+    return read_session(token, now) is not None
+
+
+def refresh_session(token: Optional[str], now: Optional[float] = None) -> Optional[str]:
+    """Activity: the same session with its idle deadline pushed back (never past the hard cap)."""
+    session = read_session(token, now)
+    if not session:
+        return None
+    return create_session(session.remember, now, sid=session.sid, issued=session.issued)
+
+
+# ---------- logging out ----------
 #
-# Sessions are tracked in memory, which is fine because the server runs as a single
-# process. A restart forgets this state, which only means the hard time limit applies.
+# Logged-out sessions are remembered in memory (the server runs as one process) so a copied
+# cookie stops working. A restart forgets them, but each one would expire on its own anyway.
 
-_state_lock = threading.Lock()
-_closing: dict[str, float] = {}   # token -> when a tab reported it was closing
-_revoked: dict[str, float] = {}   # token -> when it was ended (kept until it would expire anyway)
-
-
-def _prune(now: float):
-    cutoff = now - SESSION_SECONDS - CLOSE_GRACE_SECONDS
-    for table in (_closing, _revoked):
-        for token in [t for t, at in table.items() if at < cutoff]:
-            del table[token]
+_revoked: dict[str, float] = {}   # session id -> when its cookie would have expired at the latest
+_revoked_lock = threading.Lock()
 
 
-def session_is_live(token: Optional[str], now: Optional[float] = None) -> bool:
-    """A valid, unexpired session that has not been logged out or abandoned by a closed tab."""
-    now = now or time.time()
-    with _state_lock:
-        _prune(now)
-    if not verify_session(token, now):
-        return False
-    with _state_lock:
-        if token in _revoked:
-            return False
-        closing_since = _closing.get(token)
-        if closing_since is not None and now - closing_since > CLOSE_GRACE_SECONDS:
-            del _closing[token]
-            _revoked[token] = now
-            return False
-    return True
+def _prune_revoked(now: float):
+    with _revoked_lock:
+        for old in [k for k, until in _revoked.items() if until < now]:
+            del _revoked[old]
 
 
-def mark_closing(token: Optional[str], now: Optional[float] = None):
-    """A tab is closing. Ends the session after CLOSE_GRACE_SECONDS unless mark_alive() follows."""
-    now = now or time.time()
-    if session_is_live(token, now):
-        with _state_lock:
-            _closing.setdefault(token, now)   # repeated reports don't extend the deadline
-
-
-def mark_alive(token: Optional[str], now: Optional[float] = None):
-    """An open tab confirms it is still there (cancels a pending 'closing')."""
-    if session_is_live(token, now):
-        with _state_lock:
-            _closing.pop(token, None)
+def _is_revoked(sid: str, now: float) -> bool:
+    with _revoked_lock:
+        return sid in _revoked
 
 
 def revoke_session(token: Optional[str], now: Optional[float] = None):
-    """End a session for good (log out), even if someone kept a copy of the cookie."""
-    if token:
-        with _state_lock:
-            _closing.pop(token, None)
-            _revoked[token] = now or time.time()
+    session = read_session(token, now)
+    if session:
+        with _revoked_lock:
+            _revoked[session.sid] = session.issued + _hard_limit(session.remember)
 
 
 # ---------- credential checks with rate limiting ----------
