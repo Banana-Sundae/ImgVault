@@ -366,6 +366,7 @@ export { isApiAvailable };
 export interface AuthStatus {
   enabled: boolean;
   authenticated: boolean;
+  username: string | null;
 }
 
 /** Returns null if the backend can't be reached (e.g. frontend-only dev mode). */
@@ -406,3 +407,34 @@ export async function logout(): Promise<void> {
     }
   } catch { /* ignore */ }
 }
+
+async function postAuth(path: string, method: string, body: unknown): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) {
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+      return { ok: false, error: 'Your session has expired. Please sign in again.' };
+    }
+    if (res.ok) return { ok: true };
+    const data = isJsonResponse(res) ? await res.json().catch(() => null) : null;
+    return { ok: false, error: data?.detail || 'Something went wrong' };
+  } catch {
+    return { ok: false, error: "Can't reach ImgVault. Is the container running?" };
+  }
+}
+
+/** Turn the login on (only works while no login exists). Signs this device in. */
+export const setupLogin = (username: string, password: string) =>
+  postAuth('setup', 'POST', { username, password });
+
+/** Change username and/or password. Leave newPassword empty to keep the current one. */
+export const changeLogin = (currentPassword: string, username: string, newPassword?: string) =>
+  postAuth('credentials', 'PUT', { current_password: currentPassword, username, new_password: newPassword || null });
+
+/** Turn the login off. */
+export const disableLogin = (currentPassword: string) =>
+  postAuth('disable', 'POST', { current_password: currentPassword });
