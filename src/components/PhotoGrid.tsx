@@ -14,6 +14,8 @@ interface PhotoGridProps {
   deleteMode?: boolean;
   selectedIds?: Set<string>;
   onToggleSelect?: (id: string) => void;
+  /** Show month headings. Only meaningful when the list is sorted by date. */
+  groupByDate?: boolean;
 }
 
 // A row is either a date header or a row of photo thumbnails
@@ -33,10 +35,19 @@ function groupByDate(photos: Photo[]): Map<string, Photo[]> {
   return groups;
 }
 
-function buildRows(photos: Photo[], cols: number): GridRow[] {
+function buildRows(photos: Photo[], cols: number, withDateHeadings: boolean): GridRow[] {
   if (cols <= 0) return [];
-  const grouped = groupByDate(photos);
   const rows: GridRow[] = [];
+
+  // Any sort other than date: one continuous grid, no headings
+  if (!withDateHeadings) {
+    for (let i = 0; i < photos.length; i += cols) {
+      rows.push({ type: 'photos', photos: photos.slice(i, i + cols) });
+    }
+    return rows;
+  }
+
+  const grouped = groupByDate(photos);
 
   for (const [label, groupPhotos] of grouped) {
     rows.push({ type: 'header', label, count: groupPhotos.length });
@@ -141,7 +152,7 @@ function PhotoThumbnail({ photo, onSelect, deleteMode, selected, onToggleSelect 
   );
 }
 
-export default function PhotoGrid({ photos, onSelect, hasMore, loadingMore, onLoadMore, deleteMode, selectedIds, onToggleSelect }: PhotoGridProps) {
+export default function PhotoGrid({ photos, onSelect, hasMore, loadingMore, onLoadMore, deleteMode, selectedIds, onToggleSelect, groupByDate: showDateGroups = true }: PhotoGridProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [cols, setCols] = useState(4);
   
@@ -162,7 +173,7 @@ export default function PhotoGrid({ photos, onSelect, hasMore, loadingMore, onLo
     return () => ro.disconnect();
   }, [updateCols]);
 
-  const rows = useMemo(() => buildRows(photos, cols), [photos, cols]);
+  const rows = useMemo(() => buildRows(photos, cols, showDateGroups), [photos, cols, showDateGroups]);
 
   const HEADER_HEIGHT = 40;
   const GAP = 4;

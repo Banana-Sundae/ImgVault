@@ -263,6 +263,7 @@ export default function Index() {
             ) : viewMode === 'grid' ? (
               <PhotoGrid
                 photos={photos}
+                groupByDate={effectiveSort === 'date'}
                 onSelect={deleteMode ? undefined : setSelectedPhoto}
                 hasMore={photos.length < totalCount}
                 loadingMore={loadingMore}
