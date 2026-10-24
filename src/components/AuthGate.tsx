@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { fetchAuthStatus, UNAUTHORIZED_EVENT } from '@/lib/api-client';
+import { fetchAuthStatus, isTabSignedIn, UNAUTHORIZED_EVENT } from '@/lib/api-client';
 import LoginPage from '@/components/LoginPage';
 
 type State = 'checking' | 'login' | 'ok';
@@ -15,9 +15,16 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
   const check = useCallback(async () => {
     const status = await fetchAuthStatus();
-    // No backend reachable (frontend-only dev) or login switched off → let the app through
-    if (!status || !status.enabled || status.authenticated) setState('ok');
-    else setState('login');
+    // No backend reachable (frontend-only dev) or login switched off → let the app through.
+    // Otherwise this tab itself must have signed in (the flag disappears when the tab closes).
+    if (!status || !status.enabled) {
+      setState('ok');
+    } else if (status.authenticated && isTabSignedIn()) {
+      setState('ok');
+    } else {
+      // Not signed in, or signed in from an earlier tab that has since been closed
+      setState('login');
+    }
   }, []);
 
   useEffect(() => { check(); }, [check]);

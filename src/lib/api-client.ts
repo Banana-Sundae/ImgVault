@@ -11,6 +11,16 @@ function isJsonResponse(res: Response) {
   return contentType.includes('application/json');
 }
 
+/**
+ * Per-tab marker that this tab signed in. sessionStorage is cleared when the tab is closed,
+ * so a new tab (or a reopened one) always has to sign in again, even if the browser still
+ * holds the session cookie.
+ */
+const TAB_SIGNED_IN_KEY = 'imgvault-tab-signed-in';
+export const markTabSignedIn = () => { try { sessionStorage.setItem(TAB_SIGNED_IN_KEY, '1'); } catch { /* ignore */ } };
+export const clearTabSignedIn = () => { try { sessionStorage.removeItem(TAB_SIGNED_IN_KEY); } catch { /* ignore */ } };
+export const isTabSignedIn = () => { try { return sessionStorage.getItem(TAB_SIGNED_IN_KEY) === '1'; } catch { return false; } };
+
 /** Fired whenever the server says the session is missing or expired. AuthGate listens for it. */
 export const UNAUTHORIZED_EVENT = 'imgvault:unauthorized';
 
@@ -387,7 +397,7 @@ export async function login(username: string, password: string): Promise<{ ok: b
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
-    if (res.ok) return { ok: true };
+    if (res.ok) { markTabSignedIn(); return { ok: true }; }
     const body = isJsonResponse(res) ? await res.json().catch(() => null) : null;
     return { ok: false, error: body?.detail || 'Login failed' };
   } catch {
@@ -397,6 +407,7 @@ export async function login(username: string, password: string): Promise<{ ok: b
 
 /** Ends the session and wipes this browser's offline caches (thumbnails etc.). */
 export async function logout(): Promise<void> {
+  clearTabSignedIn();
   try {
     await fetch(`${API_BASE}/auth/logout`, { method: 'POST' });
   } catch { /* still clear local data below */ }
@@ -428,13 +439,19 @@ async function postAuth(path: string, method: string, body: unknown): Promise<{ 
 }
 
 /** Turn the login on (only works while no login exists). Signs this device in. */
-export const setupLogin = (username: string, password: string) =>
-  postAuth('setup', 'POST', { username, password });
+export const setupLogin = async (username: string, password: string) => {
+  const result = await postAuth('setup', 'POST', { username, password });
+  if (result.ok) markTabSignedIn();   // the server signed this device in
+  return result;
+};
 
 /** Change username and/or password. Leave newPassword empty to keep the current one. */
 export const changeLogin = (currentPassword: string, username: string, newPassword?: string) =>
   postAuth('credentials', 'PUT', { current_password: currentPassword, username, new_password: newPassword || null });
 
 /** Turn the login off. */
-export const disableLogin = (currentPassword: string) =>
-  postAuth('disable', 'POST', { current_password: currentPassword });
+export const disableLogin = async (currentPassword: string) => {
+  const result = await postAuth('disable', 'POST', { current_password: currentPassword });
+  if (result.ok) clearTabSignedIn();
+  return result;
+};

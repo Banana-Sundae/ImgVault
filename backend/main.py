@@ -340,7 +340,7 @@ def _with_session(body: dict, request: Request) -> JSONResponse:
     response.set_cookie(
         auth.COOKIE_NAME,
         auth.create_session(),
-        max_age=auth.SESSION_SECONDS,
+        # no max_age: a session cookie, removed when the browser closes
         httponly=True,       # not readable by page scripts
         samesite="lax",      # not sent on cross-site requests
         secure=request.url.scheme == "https",

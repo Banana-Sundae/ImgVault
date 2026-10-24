@@ -166,13 +166,14 @@ All configuration is done via environment variables:
 | `TRANSCODE_DIR` | `/data/transcoded` | Transcoded video cache directory |
 | `CONVERT_DIR` | `/data/converted` | Converted image cache directory |
 | `TRASH_DIR` | `/data/trash` | Trash/recycle bin directory |
-| `IMGVAULT_SESSION_DAYS` | `30` | How long a login lasts before you need to sign in again |
+| `IMGVAULT_SESSION_HOURS` | `12` | Longest a login can last, even if the browser stays open |
 
 ### Login
 
 Login is off by default. Turn it on from **Settings → General → Account** by choosing a username and password.
 
 - Only a salted PBKDF2-SHA256 hash of the password is stored, in `auth.json` in the database folder (e.g. `/mnt/user/appdata/imgvault/db/auth.json` on Unraid). The password itself is never saved.
+- Closing a tab signs you out of it: opening ImgVault in a new tab asks for the password again. The server-side session also ends when the browser closes, or after `IMGVAULT_SESSION_HOURS`.
 - Changing the password signs out every other device.
 - Five wrong attempts from one device lock it out for 60 seconds.
 - **Forgot the password?** Delete `auth.json` from the database folder and restart the container. Login will be off again and you can set a new one.

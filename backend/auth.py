@@ -28,8 +28,11 @@ import time
 from typing import Optional
 
 COOKIE_NAME = "imgvault_session"
-SESSION_DAYS = int(os.environ.get("IMGVAULT_SESSION_DAYS", "30"))
-SESSION_SECONDS = SESSION_DAYS * 24 * 60 * 60
+# The cookie is a browser-session cookie (no lifetime), so it is dropped when the browser
+# closes. This is the server-side backstop: a session older than this is rejected even if
+# the browser kept the cookie.
+SESSION_HOURS = int(os.environ.get("IMGVAULT_SESSION_HOURS", "12"))
+SESSION_SECONDS = SESSION_HOURS * 60 * 60
 
 PBKDF2_ITERATIONS = 600_000   # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
 MIN_PASSWORD_LENGTH = 8
