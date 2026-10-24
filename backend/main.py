@@ -11,7 +11,8 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
+
+import auth
 
 from database import (
     init_db, upsert_photo, upsert_photos_batch, search_photos, get_folder_tree, get_photo_by_id,
@@ -317,12 +318,75 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SnapVault API", version="1.0.0", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS middleware: the frontend is served from the same address as the API,
+# so cross-site access is not needed (and with a login it should not be allowed).
+
+if auth.auth_enabled():
+    logger.info("Login enabled for user '%s'", os.environ.get("IMGVAULT_USERNAME"))
+else:
+    logger.warning("Login is OFF: set IMGVAULT_USERNAME and IMGVAULT_PASSWORD to protect ImgVault")
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    """Reject any /api/ request without a valid session cookie (when login is enabled)."""
+    if auth.auth_enabled() and not auth.is_public_path(request.url.path):
+        if not auth.verify_session(request.cookies.get(auth.COOKIE_NAME)):
+            return JSONResponse({"detail": "Not logged in"}, status_code=401)
+    return await call_next(request)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+def _client_address(request: Request) -> str:
+    # nginx passes the real address in X-Real-IP; fall back to the direct peer
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request):
+    enabled = auth.auth_enabled()
+    return {
+        "enabled": enabled,
+        "authenticated": (not enabled) or auth.verify_session(request.cookies.get(auth.COOKIE_NAME)),
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(body: LoginRequest, request: Request):
+    if not auth.auth_enabled():
+        return {"ok": True}
+    address = _client_address(request)
+    wait = auth.seconds_locked(address)
+    if wait:
+        return JSONResponse(
+            {"detail": f"Too many attempts. Try again in {wait} seconds."},
+            status_code=429,
+        )
+    if not auth.check_credentials(address, body.username, body.password):
+        time.sleep(1)  # slow down guessing
+        return JSONResponse({"detail": "Incorrect username or password"}, status_code=401)
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        auth.COOKIE_NAME,
+        auth.create_session(),
+        max_age=auth.SESSION_SECONDS,
+        httponly=True,       # not readable by page scripts
+        samesite="lax",      # not sent on cross-site requests
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return response
 
 
 @app.get("/api/photos")

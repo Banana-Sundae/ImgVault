@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Settings, Globe, RefreshCw, Loader2, Sparkles, BarChart3, Trash2, Sun, Moon, Zap } from 'lucide-react';
+import { Settings, Globe, RefreshCw, Loader2, Sparkles, BarChart3, Trash2, Sun, Moon, Zap, LogOut } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { fetchSettings, updateSetting, fetchIndexStatus, triggerReindex, triggerQuickReindex, fetchStats } from '@/lib/api-client';
+import { fetchSettings, updateSetting, fetchIndexStatus, triggerReindex, triggerQuickReindex, fetchStats, fetchAuthStatus, logout } from '@/lib/api-client';
 import { toast } from 'sonner';
 import CleanupView from './CleanupView';
 import StatsDashboard from './StatsDashboard';
@@ -41,6 +41,18 @@ export default function SettingsView({ onSelectPhoto }: SettingsViewProps) {
   const [loadingSettings, setLoadingSettings] = useState(true);
   const [saving, setSaving] = useState(false);
   const [stats, setStats] = useState<any>(null);
+
+  // Login (only shown when a username/password is configured)
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  useEffect(() => {
+    fetchAuthStatus().then((st) => setAuthEnabled(!!st?.enabled));
+  }, []);
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    await logout();
+    window.location.reload();
+  };
 
   // Theme
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'));
@@ -165,6 +177,24 @@ export default function SettingsView({ onSelectPhoto }: SettingsViewProps) {
       <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin pt-4">
         {tab === 'general' && (
           <div className="max-w-lg space-y-6">
+            {/* Account */}
+            {authEnabled && (
+              <section className="space-y-3">
+                <h2 className="text-sm font-semibold text-foreground">Account</h2>
+                <div className="flex items-center justify-between rounded-lg border border-border bg-surface p-3">
+                  <span className="text-sm text-foreground">Sign out of this device</span>
+                  <button
+                    onClick={handleLogout}
+                    disabled={loggingOut}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-sm text-foreground hover:bg-secondary transition-colors active:scale-95 disabled:opacity-50"
+                  >
+                    {loggingOut ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
+                    Log out
+                  </button>
+                </div>
+              </section>
+            )}
+
             {/* Appearance */}
             <section className="space-y-3">
               <h2 className="text-sm font-semibold text-foreground">Appearance</h2>

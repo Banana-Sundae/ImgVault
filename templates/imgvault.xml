@@ -69,6 +69,8 @@
     </Volume>
   </Data>
   <Config Name="WebUI Port" Target="8080" Default="8180" Mode="tcp" Description="HTTP port for the ImgVault web UI" Type="Port" Display="always" Required="true" Mask="false">8180</Config>
+  <Config Name="Login username" Target="IMGVAULT_USERNAME" Default="" Mode="" Description="Username for the login page. Leave username or password empty to turn login off." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Login password" Target="IMGVAULT_PASSWORD" Default="" Mode="" Description="Password for the login page. Changing it signs out every device." Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="Photos (source)" Target="/data/photos" Default="/mnt/user/Pictures" Mode="rw" Description="Path to your photo and video library (will be indexed)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/Pictures</Config>
   <Config Name="Database" Target="/data/db" Default="/mnt/user/appdata/imgvault/db" Mode="rw" Description="SQLite database storage" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/imgvault/db</Config>
   <Config Name="Thumbnails" Target="/data/thumbnails" Default="/mnt/user/appdata/imgvault/thumbs" Mode="rw" Description="WebP thumbnail cache" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/imgvault/thumbs</Config>

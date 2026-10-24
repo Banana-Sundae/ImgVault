@@ -166,6 +166,9 @@ All configuration is done via environment variables:
 | `TRANSCODE_DIR` | `/data/transcoded` | Transcoded video cache directory |
 | `CONVERT_DIR` | `/data/converted` | Converted image cache directory |
 | `TRASH_DIR` | `/data/trash` | Trash/recycle bin directory |
+| `IMGVAULT_USERNAME` | *(empty)* | Login username. Login is only switched on when both username and password are set |
+| `IMGVAULT_PASSWORD` | *(empty)* | Login password. Changing it signs out every device |
+| `IMGVAULT_SESSION_DAYS` | `30` | How long a login lasts before you need to sign in again |
 
 ---
 

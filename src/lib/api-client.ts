@@ -11,8 +11,15 @@ function isJsonResponse(res: Response) {
   return contentType.includes('application/json');
 }
 
+/** Fired whenever the server says the session is missing or expired. AuthGate listens for it. */
+export const UNAUTHORIZED_EVENT = 'imgvault:unauthorized';
+
 async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(input, init);
+  if (res.status === 401) {
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    throw new Error('Not logged in');
+  }
   if (!res.ok) throw new Error(`Request failed: ${res.status}`);
   if (!isJsonResponse(res)) {
     throw new Error('API returned non-JSON response');
@@ -353,3 +360,49 @@ export async function updateSetting(key: string, value: string): Promise<void> {
 }
 
 export { isApiAvailable };
+
+// ---------- Login ----------
+
+export interface AuthStatus {
+  enabled: boolean;
+  authenticated: boolean;
+}
+
+/** Returns null if the backend can't be reached (e.g. frontend-only dev mode). */
+export async function fetchAuthStatus(): Promise<AuthStatus | null> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/status`, { cache: 'no-store' });
+    if (!res.ok || !isJsonResponse(res)) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function login(username: string, password: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (res.ok) return { ok: true };
+    const body = isJsonResponse(res) ? await res.json().catch(() => null) : null;
+    return { ok: false, error: body?.detail || 'Login failed' };
+  } catch {
+    return { ok: false, error: "Can't reach ImgVault. Is the container running?" };
+  }
+}
+
+/** Ends the session and wipes this browser's offline caches (thumbnails etc.). */
+export async function logout(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/auth/logout`, { method: 'POST' });
+  } catch { /* still clear local data below */ }
+  try {
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch { /* ignore */ }
+}
